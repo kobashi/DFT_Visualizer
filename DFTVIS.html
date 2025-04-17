@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>DFT Visualizer – Trail Time & Speed Control</title>
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.9.0/lib/p5.min.js"></script>
+  <style>
+    body { margin: 0; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; }
+    #defaultCanvas0 { border: 1px solid #aaa; }
+    .ui-row { width: 820px; display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 13px; }
+    .ui-row span.label { width: 125px; }
+    .colorBox { width: 12px; height: 12px; display: inline-block; margin-right: 4px; }
+    button.solo { padding: 2px 6px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="ui"></div>
+  <script>
+    // -------------------------------------------------------------
+    // DFT Visualizer – adjustable trail decay time & rotation speed
+    // -------------------------------------------------------------
+
+    let N = 128, n = 0;         // window length & discrete index
+
+    const baseArms = [
+      { baseLen: 220, col: 'red',    k: 2  },
+      { baseLen: 180, col: 'green',  k: 5  },
+      { baseLen: 140, col: 'blue',   k: 9  },
+      { baseLen: 100, col: 'orange', k: 13 },
+      { baseLen:  70, col: 'brown',  k: 17 }
+    ];
+
+    const arms = baseArms.map(a => ({ ...a, amp: 1, phase: 0 }));
+    const samples = [];
+
+    // UI handles
+    let Nslider, kAnalysisSlider;
+    const kSliders=[], ampSliders=[], phaseSliders=[], kValSpans=[], rowElems=[];
+    let trailSlider, speedSlider;
+    let soloIndex = -1;
+
+    function setup(){
+      createCanvas(820,820).parent(document.body);
+      angleMode(RADIANS);
+      createUI();
+    }
+
+    function createUI(){
+      const ui = select('#ui');
+      const addRow = (label, build) => {
+        const row = createDiv('').addClass('ui-row').parent(ui);
+        createSpan(label).addClass('label').parent(row);
+        build(row);
+        return row;
+      };
+
+      // Trail decay time slider (0–5 s)
+      addRow('Trail time (s)', row => {
+        trailSlider = createSlider(0, 5, 1, 0.1).parent(row).style('flex','1');
+      });
+
+      // Speed slider (10–100 %)
+      addRow('Speed (%)', row => {
+        speedSlider = createSlider(10, 100, 100, 1).parent(row).style('flex','1');
+      });
+
+      // N slider
+      addRow('N (samples)', row => {
+        Nslider = createSlider(32, 512, N, 32).parent(row).style('flex','1');
+      });
+
+      // analysis k slider
+      addRow('k (analysis)', row => {
+        kAnalysisSlider = createSlider(0, N/2, 1, 1).parent(row).style('flex','1');
+      });
+
+      // per‑arm controls
+      baseArms.forEach((a,i)=>{
+        const r = addRow(`${i+1}:`, row => {
+          createSpan('').addClass('colorBox').parent(row).style('background', a.col);
+          const ks = createSlider(0, N/2, a.k, 1).parent(row).style('width','120px');
+          kSliders.push(ks);
+          const kSpan = createSpan(`k=${a.k}`).parent(row);
+          kValSpans.push(kSpan);
+          const as = createSlider(0,100,100,1).parent(row).style('flex','1');
+          ampSliders.push(as);
+          const ps = createSlider(-180,180,0,1).parent(row).style('flex','1');
+          phaseSliders.push(ps);
+          const btn = createButton('Solo').addClass('solo').parent(row);
+          btn.mousePressed(()=>{soloIndex = (soloIndex===i?-1:i);});
+        });
+        rowElems.push(r);
+      });
+    }
+
+    function draw(){
+      // -------- Trail fade control --------
+      const trailSec = trailSlider.value();
+      if(trailSec === 0){
+        background(255);
+      } else {
+        const fps = 60;                         // approximate frame rate
+        const alpha = 255 / (trailSec * fps);   // linear fade per frame
+        fill(255,255,255, alpha);
+        noStroke();
+        rect(0,0,width,height);
+      }
+
+      translate(width/2, height/2);
+
+      // -------- UI sync --------
+      const speedFactor = speedSlider.value() / 100; // 0.1 – 1
+      N = Nslider.value();
+      const nyq = Math.floor(N/2);
+      kAnalysisSlider.attribute('max', nyq);
+      kSliders.forEach(s=>s.attribute('max', nyq));
+
+      kSliders.forEach((s,i)=>{ arms[i].k = s.value(); kValSpans[i].html(`k=${s.value()}`); });
+      ampSliders.forEach((s,i)=> arms[i].amp = s.value()/100 );
+      phaseSliders.forEach((s,i)=> arms[i].phase = radians(s.value()) );
+      rowElems.forEach((row,i)=> row.style('opacity', (soloIndex!==-1&&soloIndex!==i)?0.3:1) );
+
+      const kAnalysis = kAnalysisSlider.value();
+
+      // -------- axes --------
+      stroke(220);
+      line(-width/2,0,width/2,0); line(0,-height/2,0,height/2);
+
+      // -------- composite sample --------
+      let tip = createVector(0,0);
+      arms.forEach((a,i)=>{
+        const activeAmp = (soloIndex===-1 || soloIndex===i) ? a.amp : 0;
+        if(activeAmp === 0) return;
+        const theta = TWO_PI * a.k * n / N * speedFactor + a.phase;
+        const v = p5.Vector.fromAngle(theta).mult(a.baseLen * activeAmp);
+        stroke(a.col); strokeWeight(2); line(0,0,v.x,v.y);
+        tip.add(v);
+      });
+      fill(0); noStroke(); circle(tip.x, tip.y, 8);
+
+      // buffer update
+      samples.push(tip.copy()); while(samples.length > N) samples.shift();
+      n += speedFactor; // fractional advance respecting speed
+
+      // -------- DFT coefficient & reconstruction --------
+      const Ck = dftCoeff(kAnalysis);
+      stroke('purple'); strokeWeight(3); line(0,0,Ck.x*400,Ck.y*400);
+      fill('purple'); circle(Ck.x*400,Ck.y*400,6);
+
+      const Cmag=Ck.mag(); const Cphase=Math.atan2(Ck.y,Ck.x);
+      const reconTheta = TWO_PI * kAnalysis * n / N + Cphase;
+      const vRec = p5.Vector.fromAngle(reconTheta).mult(Cmag*400);
+      stroke('magenta'); strokeWeight(2); line(0,0,vRec.x,vRec.y);
+      fill('magenta'); circle(vRec.x,vRec.y,6);
+
+      // -------- legend --------
+      resetMatrix(); fill(0); textSize(13);
+      text(`Trail=${trailSec.toFixed(1)}s   Speed=${(speedFactor*100).toFixed(0)}%`, 10, 18);
+      text(`N=${N} (Nyquist=${nyq})`, 10, 34);
+      text(`kₐ=${kAnalysis}  |C_k|=${Cmag.toFixed(3)}`, 10, 50);
+      text(`Solo: ${soloIndex===-1?'none':soloIndex+1}`, 10, 66);
+    }
+
+    // compute complex DFT coefficient of buffer (normalised)
+    function dftCoeff(k){
+      let re=0, im=0; const M=samples.length;
+      for(let i=0;i<M;i++){
+        const s = samples[M-1-i];
+        const phi = TWO_PI * k * i / N;
+        const c = Math.cos(phi), sN = -Math.sin(phi);
+        re += s.x * c - s.y * sN;
+        im += s.x * sN + s.y * c;
+      }
+      return createVector(re/N, im/N);
+    }
+  </script>
+</body>
+</html>
